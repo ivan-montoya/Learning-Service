@@ -42,6 +42,15 @@ from packages.valory.skills.learning_abci.rounds import (
     TxPreparationRound,
 )
 
+# Added by Ivan
+import json
+from typing import Any, Optional
+from packages.valory.contracts.gnosis_safe.contract import GnosisSafeContract
+from packages.valory.protocols.contract_api import ContractApiMessage
+from packages.valory.skills.transaction_settlement_abci.rounds import TX_HASH_LENGTH
+from packages.valory.skills.transaction_settlement_abci.payload_tools import (
+    hash_payload_to_hex,
+)
 
 HTTP_OK = 200
 GNOSIS_CHAIN_ID = "gnosis"
@@ -91,9 +100,21 @@ class APICheckBehaviour(LearningBaseBehaviour):  # pylint: disable=too-many-ance
 
     def get_price(self):
         """Get token price from Coingecko"""
-        # result = yield from self.get_http_response("coingecko.com")
-        yield
-        price = 1.0
+
+        url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&x_cg_demo_api_key=CG-8TNdtWrUiXbxDPQ1MYsoy6wU"
+
+        header = {"accept": "application/json"}
+
+        result = yield from self.get_http_response(method='GET', url=url, headers=header)
+
+        str_data = result.body.decode()
+        data = json.loads(str_data)
+                     
+        if result is None:
+            price = 0.0
+        else:
+            price = data['bitcoin']['usd']
+
         self.context.logger.info(f"Price is {price}")
         return price
 
@@ -122,7 +143,11 @@ class DecisionMakingBehaviour(
     def get_event(self):
         """Get the next event"""
         # Using the token price from the previous round, decide whether we should make a transfer or not
-        event = Event.DONE.value
+
+        if self.synchronized_data.price <= 0.0:
+            event = Event.DONE.value
+        else:
+            event = Event.TRANSACT.value
         self.context.logger.info(f"Event is {event}")
         return event
 
@@ -153,10 +178,57 @@ class TxPreparationBehaviour(
     def get_tx_hash(self):
         """Get the tx hash"""
         # We need to prepare a 1 wei transfer from the safe to another (configurable) account.
-        yield
-        tx_hash = None
+        call_data = {VALUE_KEY: 1, TO_ADDRESS_KEY: self.params.transfer_target_address}
+
+        safe_tx_hash = yield from self._build_safe_tx_hash(**call_data)
+        if safe_tx_hash is None:
+            self.context.logger.error("Could not build the safe transaction's hash.")
+            return None
+
+        tx_hash = hash_payload_to_hex(
+            safe_tx_hash,
+            call_data[VALUE_KEY],
+            SAFE_GAS,
+            call_data[TO_ADDRESS_KEY],
+            TX_DATA,
+        )
+
         self.context.logger.info(f"Transaction hash is {tx_hash}")
         return tx_hash
+    
+    def _build_safe_tx_hash(
+        self, **kwargs: Any
+    ) -> Generator[None, None, Optional[str]]:
+        """Prepares and returns the safe tx hash for a multisend tx."""
+        response_msg = yield from self.get_contract_api_response(
+            performative=ContractApiMessage.Performative.GET_STATE,  # type: ignore
+            contract_address=self.synchronized_data.safe_contract_address,
+            contract_id=str(GnosisSafeContract.contract_id),
+            contract_callable="get_raw_safe_transaction_hash",
+            data=TX_DATA,
+            safe_tx_gas=SAFE_GAS,
+            chain_id=GNOSIS_CHAIN_ID,
+            **kwargs,
+        )
+
+        if response_msg.performative != ContractApiMessage.Performative.STATE:
+            self.context.logger.error(
+                "Couldn't get safe tx hash. Expected response performative "
+                f"{ContractApiMessage.Performative.STATE.value!r}, "  # type: ignore
+                f"received {response_msg.performative.value!r}: {response_msg}."
+            )
+            return None
+
+        tx_hash = response_msg.state.body.get("tx_hash", None)
+        if tx_hash is None or len(tx_hash) != TX_HASH_LENGTH:
+            self.context.logger.error(
+                "Something went wrong while trying to get the buy transaction's hash. "
+                f"Invalid hash {tx_hash!r} was returned."
+            )
+            return None
+
+        # strip "0x" from the response hash
+        return tx_hash[2:]
 
 
 class LearningRoundBehaviour(AbstractRoundBehaviour):
