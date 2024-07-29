@@ -1,9 +1,9 @@
 {
     "dev": {
-        "skill/valory/learning_abci/0.1.0": "bafybeib3lzpeui7mw6z3il3x23muy2qbdcw7cbrlkodaqbaxu6of54hgo4",
-        "skill/valory/learning_chained_abci/0.1.0": "bafybeihmgjnway75zpjirtuurlx5zztwt7nadwtxnqjrnjppxnn256m6wy",
-        "agent/valory/learning_agent/0.1.0": "bafybeifmrlgd4oy34ew4xz3brpaikmdtal3cxu6w3caiiu7szdedpimuye",
-        "service/valory/learning_service/0.1.0": "bafybeid6lflya6e6m3iqays5svhdwzu63rv46hcfy4eyfnw5s7plhwyfdi"
+        "skill/valory/learning_abci/0.1.0": "bafybeihvwgeat4eo3jh46dfdhagyaz6tzglanxhrmlvppw474s4soh7r4i",
+        "skill/valory/learning_chained_abci/0.1.0": "bafybeig4ix3eqqqnv2vxvwzxkrhghvhigvhlw4ov3qgj4u5z36sai6fuaq",
+        "agent/valory/learning_agent/0.1.0": "bafybeietsgd4ilqpg4k233uvonjsxqjdlja44jjt2qxcmtkafm6u5ska4q",
+        "service/valory/learning_service/0.1.0": "bafybeib7vrbghwzvzjgf7hj7wgx4gbhkcerpa3ed523ipn5cchqhthx5aa"
     },
     "third_party": {
         "protocol/open_aea/signing/1.0.0": "bafybeihv62fim3wl2bayavfcg3u5e5cxu3b7brtu4cn5xoxd6lqwachasi",

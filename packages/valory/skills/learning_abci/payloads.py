@@ -31,6 +31,12 @@ class APICheckPayload(BaseTxPayload):
 
     price: Optional[float]
 
+@dataclass(frozen=True)
+class SendDataToIPFSPayload(BaseTxPayload):
+    """Represent a transaction payload for the SendDataToIPFSRound."""
+
+    ipfs_hash: Optional[str] = None
+
 
 @dataclass(frozen=True)
 class DecisionMakingPayload(BaseTxPayload):
@@ -45,3 +51,11 @@ class TxPreparationPayload(BaseTxPayload):
 
     tx_submitter: Optional[str] = None
     tx_hash: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class MultisendTxPreparationPayload(BaseTxPayload):
+    """Represent a transaction payload for the MultisendTxPreparationRound."""
+
+    tx_submitter: Optional[str] = None
+    muiltisend_tx_hash: Optional[str] = None

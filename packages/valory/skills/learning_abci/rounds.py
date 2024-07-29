@@ -36,8 +36,10 @@ from packages.valory.skills.abstract_round_abci.base import (
 )
 from packages.valory.skills.learning_abci.payloads import (
     APICheckPayload,
+    SendDataToIPFSPayload,
     DecisionMakingPayload,
     TxPreparationPayload,
+    MultisendTxPreparationPayload,
 )
 
 
@@ -47,6 +49,7 @@ class Event(Enum):
     DONE = "done"
     ERROR = "error"
     TRANSACT = "transact"
+    MULTISEND_TRANSACT = "multisend"
     NO_MAJORITY = "no_majority"
     ROUND_TIMEOUT = "round_timeout"
 
@@ -72,6 +75,16 @@ class SynchronizedData(BaseSynchronizedData):
     def participant_to_price_round(self) -> DeserializedCollection:
         """Get the participants to the price round."""
         return self._get_deserialized("participant_to_price_round")
+    
+    @property
+    def participant_to_ipfs_round(self) -> DeserializedCollection:
+        """Get the participants to the ipfs round."""
+        return self._get_deserialized("participant_to_ipfs_round")
+    
+    @property
+    def ipfs_hash(self) -> Optional[float]:
+        """Get the data ipfs_hash."""
+        return self.db.get("ipfs_hash", None)
 
     @property
     def most_voted_tx_hash(self) -> Optional[float]:
@@ -98,6 +111,18 @@ class APICheckRound(CollectSameUntilThresholdRound):
     no_majority_event = Event.NO_MAJORITY
     collection_key = get_name(SynchronizedData.participant_to_price_round)
     selection_key = get_name(SynchronizedData.price)
+
+    # Event.ROUND_TIMEOUT  # this needs to be referenced for static checkers
+
+class SendDataToIPFSRound(CollectSameUntilThresholdRound):
+    """SendDataToIPFSRound"""
+
+    payload_class = SendDataToIPFSPayload
+    synchronized_data_class = SynchronizedData
+    done_event = Event.DONE
+    no_majority_event = Event.NO_MAJORITY
+    collection_key = get_name(SynchronizedData.participant_to_ipfs_round)
+    selection_key = get_name(SynchronizedData.ipfs_hash)
 
     # Event.ROUND_TIMEOUT  # this needs to be referenced for static checkers
 
@@ -141,6 +166,22 @@ class TxPreparationRound(CollectSameUntilThresholdRound):
     # Event.ROUND_TIMEOUT  # this needs to be referenced for static checkers
 
 
+class MultisendTxPreparationRound(CollectSameUntilThresholdRound):
+    """MultisendTxPreparationRound"""
+
+    payload_class = MultisendTxPreparationPayload
+    synchronized_data_class = SynchronizedData
+    done_event = Event.DONE
+    no_majority_event = Event.NO_MAJORITY
+    collection_key = get_name(SynchronizedData.participant_to_tx_round)
+    selection_key = (
+        get_name(SynchronizedData.tx_submitter),
+        get_name(SynchronizedData.most_voted_tx_hash),
+    )
+
+    # Event.ROUND_TIMEOUT  # this needs to be referenced for static checkers
+
+
 class FinishedDecisionMakingRound(DegenerateRound):
     """FinishedDecisionMakingRound"""
 
@@ -160,6 +201,11 @@ class LearningAbciApp(AbciApp[Event]):
         APICheckRound: {
             Event.NO_MAJORITY: APICheckRound,
             Event.ROUND_TIMEOUT: APICheckRound,
+            Event.DONE: SendDataToIPFSRound,
+        },
+        SendDataToIPFSRound: {
+            Event.NO_MAJORITY: SendDataToIPFSRound,
+            Event.ROUND_TIMEOUT: SendDataToIPFSRound,
             Event.DONE: DecisionMakingRound,
         },
         DecisionMakingRound: {
@@ -168,10 +214,16 @@ class LearningAbciApp(AbciApp[Event]):
             Event.DONE: FinishedDecisionMakingRound,
             Event.ERROR: FinishedDecisionMakingRound,
             Event.TRANSACT: TxPreparationRound,
+            Event.MULTISEND_TRANSACT: MultisendTxPreparationRound
         },
         TxPreparationRound: {
             Event.NO_MAJORITY: TxPreparationRound,
             Event.ROUND_TIMEOUT: TxPreparationRound,
+            Event.DONE: FinishedTxPreparationRound,
+        },
+        MultisendTxPreparationRound: {
+            Event.NO_MAJORITY: MultisendTxPreparationRound,
+            Event.ROUND_TIMEOUT: MultisendTxPreparationRound,
             Event.DONE: FinishedTxPreparationRound,
         },
         FinishedDecisionMakingRound: {},

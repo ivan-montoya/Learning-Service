@@ -30,27 +30,38 @@ from packages.valory.skills.abstract_round_abci.behaviours import (
 from packages.valory.skills.learning_abci.models import Params, SharedState
 from packages.valory.skills.learning_abci.payloads import (
     APICheckPayload,
+    SendDataToIPFSPayload,
     DecisionMakingPayload,
     TxPreparationPayload,
+    MultisendTxPreparationPayload,
 )
 from packages.valory.skills.learning_abci.rounds import (
     APICheckRound,
+    SendDataToIPFSRound,
     DecisionMakingRound,
     Event,
     LearningAbciApp,
     SynchronizedData,
     TxPreparationRound,
+    MultisendTxPreparationRound,
 )
 
 # Added by Ivan
 import json
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 from packages.valory.contracts.gnosis_safe.contract import GnosisSafeContract
 from packages.valory.protocols.contract_api import ContractApiMessage
+from packages.valory.skills.abstract_round_abci.io_.store import SupportedFiletype
 from packages.valory.skills.transaction_settlement_abci.rounds import TX_HASH_LENGTH
 from packages.valory.skills.transaction_settlement_abci.payload_tools import (
     hash_payload_to_hex,
 )
+from packages.valory.contracts.multisend.contract import (
+    MultiSendContract,
+    MultiSendOperation,
+)
+from pathlib import Path
+from tempfile import mkdtemp
 
 HTTP_OK = 200
 GNOSIS_CHAIN_ID = "gnosis"
@@ -58,6 +69,12 @@ TX_DATA = b"0x"
 SAFE_GAS = 0
 VALUE_KEY = "value"
 TO_ADDRESS_KEY = "to_address"
+
+HTTP = "http://"
+HTTPS = HTTP[:4] + "s" + HTTP[4:]
+IPFS_ADDRESS = f"{HTTPS}gateway.autonolas.tech/ipfs/"
+METADATA_FILENAME = "metadata.json"
+ETHER_VALUE = 0
 
 
 class LearningBaseBehaviour(BaseBehaviour, ABC):  # pylint: disable=too-many-ancestors
@@ -117,6 +134,55 @@ class APICheckBehaviour(LearningBaseBehaviour):  # pylint: disable=too-many-ance
 
         self.context.logger.info(f"Price is {price}")
         return price
+    
+
+class SendDataToIPFSBehaviour(LearningBaseBehaviour):  # pylint: disable=too-many-ancestors
+    """SendDataToIPFSBehaviour"""
+
+    matching_round: Type[AbstractRound] = SendDataToIPFSRound
+
+    @property
+    def metadata_filepath(self) -> str:
+        """Get the filepath to the metadata."""
+        return str(Path(mkdtemp()) / METADATA_FILENAME)
+
+    def async_act(self) -> Generator:
+        """Do the act, supporting asynchronous execution."""
+
+        with self.context.benchmark_tool.measure(self.behaviour_id).local():
+            sender = self.context.agent_address
+            data = yield from self.get_stablecoin_prices()
+            data_hash = yield from self.send_data_to_ipfs(data)
+            payload = SendDataToIPFSPayload(sender=sender, ipfs_hash=data_hash)
+
+        with self.context.benchmark_tool.measure(self.behaviour_id).consensus():
+            yield from self.send_a2a_transaction(payload)
+            yield from self.wait_until_round_end()
+
+        self.set_done()
+
+    def get_stablecoin_prices(self):
+        """Get stablecoin price from Coingecko"""
+
+        url = "https://api.coingecko.com/api/v3/simple/price?ids=usd-coin%2Ctether%2Cdai%2Cusdd%2Cethena-usde%2Cusdb&vs_currencies=usd&x_cg_api_key=CG-8TNdtWrUiXbxDPQ1MYsoy6wU"
+
+        header = {"accept": "application/json"}
+
+        result = yield from self.get_http_response(method='GET', url=url, headers=header)
+
+        str_data = result.body.decode()
+        data = json.loads(str_data)
+
+        self.context.logger.info(f"Stablecoin data is {data}")
+        return data
+
+    def send_data_to_ipfs(self, data):
+         """Send Mech metadata to IPFS."""
+         data_hash = yield from self.send_to_ipfs(
+             self.metadata_filepath, data, filetype=SupportedFiletype.JSON
+         )
+
+         return data_hash
 
 
 class DecisionMakingBehaviour(
@@ -144,12 +210,32 @@ class DecisionMakingBehaviour(
         """Get the next event"""
         # Using the token price from the previous round, decide whether we should make a transfer or not
 
-        if self.synchronized_data.price <= 0.0:
+        data = yield from self.get_ipfs_data()
+
+        self.context.logger.info(f"Data json.loaded is {data}")
+
+        self.context.logger.info(f"Stored IPFS hash is {self.synchronized_data.ipfs_hash}")
+
+        if 1.0 <= 0.0:
             event = Event.DONE.value
         else:
             event = Event.TRANSACT.value
         self.context.logger.info(f"Event is {event}")
         return event
+    
+    def get_ipfs_data(self) -> Any:
+        res_raw = yield from self.get_from_ipfs(self.synchronized_data.ipfs_hash, filetype=SupportedFiletype.JSON)
+
+        str_data = res_raw.body.decode()
+
+        self.context.logger.info(f"Data decoded from IPFS is {str_data}")
+
+        data = json.loads(str_data)
+
+        return data
+    
+    def get_stablecoin_average_price(self, data):
+        coins = json.loads(data)
 
 
 class TxPreparationBehaviour(
@@ -193,7 +279,6 @@ class TxPreparationBehaviour(
             TX_DATA,
         )
 
-        self.context.logger.info(f"Transaction hash is {tx_hash}")
         return tx_hash
     
     def _build_safe_tx_hash(
@@ -229,6 +314,189 @@ class TxPreparationBehaviour(
 
         # strip "0x" from the response hash
         return tx_hash[2:]
+    
+
+class MultisendTxPreparationBehaviour(
+    LearningBaseBehaviour
+):  # pylint: disable=too-many-ancestors
+    """MultisendTxPreparationBehaviour"""
+
+    matching_round: Type[AbstractRound] = MultisendTxPreparationRound
+
+    def async_act(self) -> Generator:
+        """Do the act, supporting asynchronous execution."""
+
+        with self.context.benchmark_tool.measure(self.behaviour_id).local():
+            sender = self.context.agent_address
+            tx_hash = yield from self.get_tx_hash()
+            payload = MultisendTxPreparationPayload(
+                sender=sender, tx_submitter=None, tx_hash=tx_hash
+            )
+
+        with self.context.benchmark_tool.measure(self.behaviour_id).consensus():
+            yield from self.send_a2a_transaction(payload)
+            yield from self.wait_until_round_end()
+
+        self.set_done()
+
+    def get_tx_hash(self):
+        """Get the tx hash"""
+        # We need to prepare a 1 wei transfer from the safe to another (configurable) account.
+        call_data = {VALUE_KEY: 1, TO_ADDRESS_KEY: self.params.transfer_target_address}
+
+        safe_tx_hash = yield from self._build_safe_tx_hash(**call_data)
+        if safe_tx_hash is None:
+            self.context.logger.error("Could not build the safe transaction's hash.")
+            return None
+
+        tx_hash = hash_payload_to_hex(
+            safe_tx_hash,
+            call_data[VALUE_KEY],
+            SAFE_GAS,
+            call_data[TO_ADDRESS_KEY],
+            TX_DATA,
+        )
+
+        return tx_hash
+    
+    def get_tx_data(self, **kwargs: Any) -> Generator[None, None, Optional[bytes]]:
+        response = yield from self.get_contract_api_response(
+            performative=ContractApiMessage.Performative.GET_STATE,  # type: ignore
+            contract_address=self.synchronized_data.safe_contract_address,
+            contract_id=str(GnosisSafeContract.contract_id),
+            contract_callable="get_tx_data",
+            safe_tx_gas=SAFE_GAS,
+            chain_id=GNOSIS_CHAIN_ID,
+            **kwargs,
+        )
+
+        if response.performative != ContractApiMessage.Performative.STATE:
+            self.context.logger.error(
+                f"Couldn't get tx data for IManagedPool.removeAllowedAddress(). "
+                f"Expected response performative {ContractApiMessage.Performative.STATE.value}, "  # type: ignore
+                f"received {response.performative.value}."
+            )
+            return None
+
+        # strip "0x" from the response data
+        data_str = cast(str, response.state.body["data"])[2:]
+        data = bytes.fromhex(data_str)
+        return data
+
+
+    def _build_safe_tx_hash(
+        self, **kwargs: Any
+    ) -> Generator[None, None, Optional[str]]:
+        """Prepares and returns the safe tx hash for a multisend tx."""
+        response_msg = yield from self.get_contract_api_response(
+            performative=ContractApiMessage.Performative.GET_STATE,  # type: ignore
+            contract_address=self.synchronized_data.safe_contract_address,
+            contract_id=str(GnosisSafeContract.contract_id),
+            contract_callable="get_raw_safe_transaction_hash",
+            data=TX_DATA,
+            safe_tx_gas=SAFE_GAS,
+            chain_id=GNOSIS_CHAIN_ID,
+            **kwargs,
+        )
+
+        if response_msg.performative != ContractApiMessage.Performative.STATE:
+            self.context.logger.error(
+                "Couldn't get safe tx hash. Expected response performative "
+                f"{ContractApiMessage.Performative.STATE.value!r}, "  # type: ignore
+                f"received {response_msg.performative.value!r}: {response_msg}."
+            )
+            return None
+
+        tx_hash = response_msg.state.body.get("tx_hash", None)
+        if tx_hash is None or len(tx_hash) != TX_HASH_LENGTH:
+            self.context.logger.error(
+                "Something went wrong while trying to get the buy transaction's hash. "
+                f"Invalid hash {tx_hash!r} was returned."
+            )
+            return None
+
+        # strip "0x" from the response hash
+        return tx_hash[2:]
+
+    def _get_multisend_tx(
+        self, txs: List[bytes]
+    ) -> Generator[None, None, Optional[str]]:
+        """Given a list of transactions, bundle them together in a single multisend tx."""
+        multi_send_txs = [self._to_multisend_format(tx) for tx in txs]
+        response = yield from self.get_contract_api_response(
+            performative=ContractApiMessage.Performative.GET_RAW_TRANSACTION,  # type: ignore
+            contract_address=self.synchronized_data.safe_contract_address,
+            contract_id=str(MultiSendContract.contract_id),
+            contract_callable="get_tx_data",
+            multi_send_txs=multi_send_txs,
+        )
+        if response.performative != ContractApiMessage.Performative.RAW_TRANSACTION:
+            self.context.logger.error(
+                f"Couldn't compile the multisend tx. "
+                f"Expected response performative {ContractApiMessage.Performative.RAW_TRANSACTION.value}, "  # type: ignore
+                f"received {response.performative.value}."
+            )
+            return None
+
+        # strip "0x" from the response
+        multisend_data_str = cast(str, response.raw_transaction.body["data"])[2:]
+        tx_data = bytes.fromhex(multisend_data_str)
+        tx_hash = yield from self._get_safe_tx_hash(tx_data)
+        if tx_hash is None:
+            # something went wrong
+            return None
+
+        payload_data = hash_payload_to_hex(
+            safe_tx_hash=tx_hash,
+            ether_value=ETHER_VALUE,
+            safe_tx_gas=SAFE_GAS,
+            operation=SafeOperation.DELEGATE_CALL.value,
+            to_address=self.params.multisend_address,
+            data=tx_data,
+        )
+        return payload_data
+
+    def _to_multisend_format(self, single_tx: bytes) -> Dict[str, Any]:
+        """This method puts tx data from a single tx into the multisend format."""
+        multisend_format = {
+            "operation": MultiSendOperation.CALL,
+            "to": self.params.managed_pool_address,
+            "value": ETHER_VALUE,
+            "data": HexBytes(single_tx),
+        }
+        return multisend_format
+    
+    def _get_tx(self, data: bytes) -> Generator[None, None, Optional[str]]:
+        """
+        Prepares and returns the safe tx hash.
+
+        This hash will be signed later by the agents, and submitted to the safe contract.
+        Note that this is the transaction that the safe will execute, with the provided data.
+
+        :param data: the safe tx data. This is the data of the function being called, in this case `updateWeightGradually`.
+        :return: the tx hash
+        """
+        response = yield from self.get_contract_api_response(
+            performative=ContractApiMessage.Performative.GET_STATE,  # type: ignore
+            contract_address=self.synchronized_data.safe_contract_address,
+            contract_id=str(MultiSendContract.contract_id),
+            contract_callable="get_raw_safe_transaction_hash",
+            data=data,
+            safe_tx_gas=SAFE_GAS,
+            chain_id=GNOSIS_CHAIN_ID,
+        )
+
+        if response.performative != ContractApiMessage.Performative.STATE:
+            self.context.logger.error(
+                f"Couldn't get safe hash. "
+                f"Expected response performative {ContractApiMessage.Performative.STATE.value}, "  # type: ignore
+                f"received {response.performative.value}."
+            )
+            return None
+
+        # strip "0x" from the response hash
+        tx_hash = cast(str, response.state.body["tx_hash"])[2:]
+        return tx_hash
 
 
 class LearningRoundBehaviour(AbstractRoundBehaviour):
@@ -238,6 +506,8 @@ class LearningRoundBehaviour(AbstractRoundBehaviour):
     abci_app_cls = LearningAbciApp  # type: ignore
     behaviours: Set[Type[BaseBehaviour]] = [  # type: ignore
         APICheckBehaviour,
+        SendDataToIPFSBehaviour,
         DecisionMakingBehaviour,
         TxPreparationBehaviour,
+        MultisendTxPreparationBehaviour,
     ]
