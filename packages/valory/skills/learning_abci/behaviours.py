@@ -376,22 +376,9 @@ class MultisendTxPreparationBehaviour(
             "value": 0,
             "data": TX_DATA,
         }
-        transaction2 = {
-            "operation": SafeOperation.DELEGATE_CALL.value,
-            "to": self.synchronized_data.safe_contract_address,
-            "value": 0,
-            "data": TX_DATA,
-        }
-        transaction3 = {
-            "operation": SafeOperation.DELEGATE_CALL.value,
-            "to": self.synchronized_data.safe_contract_address,
-            "value": 0,
-            "data": TX_DATA,
-        }
-
         multi_send_txs.append(transaction1)
-        multi_send_txs.append(transaction2)
-        multi_send_txs.append(transaction3)
+       # multi_send_txs.append(transaction2)
+       # multi_send_txs.append(transaction3)
 
         response = yield from self.get_contract_api_response(
             performative=ContractApiMessage.Performative.GET_RAW_TRANSACTION,  # type: ignore
@@ -399,6 +386,7 @@ class MultisendTxPreparationBehaviour(
             contract_id=str(MultiSendContract.contract_id),
             contract_callable="get_tx_data",
             multi_send_txs=multi_send_txs,
+            chain_id=GNOSIS_CHAIN_ID
         )
         if response.performative != ContractApiMessage.Performative.RAW_TRANSACTION:
             self.context.logger.error(
